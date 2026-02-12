@@ -1,48 +1,60 @@
 /**
  * Streams JSON array data from database to response
+ * Uses cursor-based batching for memory efficiency
  */
 async function streamToJSON(client, columnMap, outputStream, batchSize = 10000) {
   const columnList = columnMap.map(col => col.source).join(', ');
 
   outputStream.write('[');
 
-  const query = `SELECT ${columnList} FROM records ORDER BY id`;
-  const queryStream = client.query(query);
+  try {
+    await client.query('BEGIN');
+    await client.query(`DECLARE json_cursor CURSOR FOR SELECT ${columnList} FROM records ORDER BY id`);
 
-  return new Promise((resolve, reject) => {
     let firstRow = true;
-    let rowBuffer = [];
-    let batchCount = 0;
+    let totalRows = 0;
+    let hasMore = true;
 
-    queryStream.on('row', (row) => {
-      const jsonObj = {};
-      columnMap.forEach(({ source, target }) => {
-        jsonObj[target] = row[source];
-      });
+    while (hasMore) {
+      const result = await client.query(`FETCH ${batchSize} FROM json_cursor`);
+      const rows = result.rows;
 
-      const prefix = firstRow ? '' : ',';
-      firstRow = false;
-
-      rowBuffer.push(prefix + JSON.stringify(jsonObj));
-      batchCount++;
-
-      if (batchCount % 1000 === 0) {
-        outputStream.write(rowBuffer.join(''));
-        rowBuffer = [];
-      }
-    });
-
-    queryStream.on('error', reject);
-    queryStream.on('end', () => {
-      if (rowBuffer.length > 0) {
-        outputStream.write(rowBuffer.join(''));
+      if (rows.length === 0) {
+        hasMore = false;
+        break;
       }
 
-      outputStream.write(']');
-      outputStream.end();
-      resolve();
-    });
-  });
+      let jsonBatch = '';
+      for (const row of rows) {
+        const jsonObj = {};
+        columnMap.forEach(({ source, target }) => {
+          jsonObj[target] = row[source];
+        });
+
+        const prefix = firstRow ? '' : ',';
+        firstRow = false;
+
+        jsonBatch += prefix + JSON.stringify(jsonObj);
+        totalRows++;
+      }
+
+      outputStream.write(jsonBatch);
+    }
+
+    await client.query('CLOSE json_cursor');
+    await client.query('COMMIT');
+
+    outputStream.write(']');
+    outputStream.end();
+    console.log(`JSON export completed. Total rows: ${totalRows}`);
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      // Ignore rollback errors
+    }
+    throw error;
+  }
 }
 
 module.exports = {

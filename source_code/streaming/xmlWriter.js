@@ -1,40 +1,52 @@
 /**
  * Streams XML data from database to response
+ * Uses cursor-based batching for memory efficiency
  */
 async function streamToXML(client, columnMap, outputStream, batchSize = 10000) {
   const columnList = columnMap.map(col => col.source).join(', ');
 
   outputStream.write('<?xml version="1.0" encoding="UTF-8"?>\n<records>\n');
 
-  const query = `SELECT ${columnList} FROM records ORDER BY id`;
-  const queryStream = client.query(query);
+  try {
+    await client.query('BEGIN');
+    await client.query(`DECLARE xml_cursor CURSOR FOR SELECT ${columnList} FROM records ORDER BY id`);
 
-  return new Promise((resolve, reject) => {
-    let xmlBuffer = '';
-    let batchCount = 0;
+    let totalRows = 0;
+    let hasMore = true;
 
-    queryStream.on('row', (row) => {
-      const recordXml = buildXmlRecord(columnMap, row);
-      xmlBuffer += recordXml + '\n';
-      batchCount++;
+    while (hasMore) {
+      const result = await client.query(`FETCH ${batchSize} FROM xml_cursor`);
+      const rows = result.rows;
 
-      if (batchCount % 1000 === 0) {
-        outputStream.write(xmlBuffer);
-        xmlBuffer = '';
-      }
-    });
-
-    queryStream.on('error', reject);
-    queryStream.on('end', () => {
-      if (xmlBuffer.length > 0) {
-        outputStream.write(xmlBuffer);
+      if (rows.length === 0) {
+        hasMore = false;
+        break;
       }
 
-      outputStream.write('</records>');
-      outputStream.end();
-      resolve();
-    });
-  });
+      let xmlBatch = '';
+      for (const row of rows) {
+        const recordXml = buildXmlRecord(columnMap, row);
+        xmlBatch += recordXml + '\n';
+        totalRows++;
+      }
+
+      outputStream.write(xmlBatch);
+    }
+
+    await client.query('CLOSE xml_cursor');
+    await client.query('COMMIT');
+
+    outputStream.write('</records>');
+    outputStream.end();
+    console.log(`XML export completed. Total rows: ${totalRows}`);
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      // Ignore rollback errors
+    }
+    throw error;
+  }
 }
 
 /**
