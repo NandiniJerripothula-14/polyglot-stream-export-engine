@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stream-export-app
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/exports_db
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=exports_db
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - PORT=8080
+      - NODE_ENV=production
+      - MAX_BATCH_SIZE=10000
+      - EXPORT_TIMEOUT_MS=600000
+    # Memory limit to enforce efficient streaming
+    mem_limit: 256m
+    networks:
+      - stream-network
+    volumes:
+      - ./source_code:/app/source_code:ro
+    restart: unless-stopped
+
+  db:
+    image: postgres:13
+    container_name: stream-export-db
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=exports_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d exports_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stream-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  stream-network:
+    driver: bridge
